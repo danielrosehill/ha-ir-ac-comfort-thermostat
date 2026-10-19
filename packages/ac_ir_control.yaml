@@ -1,0 +1,89 @@
+# IR-only AC control surface — the layer the Comfort Thermostat writes to.
+# Pattern: the AC can't report state, so HA *holds* the state in helpers and
+# re-sends one full frame (mode + temp + fan) on every change.
+# Assumes an AC whose remote sends a complete state frame per button press and
+# a separate power TOGGLE frame (common on cheap/ducted units).
+# Replace remote.REPLACE_ir_blaster and the codes with your own (learned with
+# remote.learn_command, or generated if you've decoded the protocol).
+
+input_boolean:
+  bedroom_ac_on:
+    name: AC (assumed on)
+    icon: mdi:air-conditioner
+
+input_select:
+  bedroom_ac_mode:
+    name: AC Mode
+    options: [cool, heat]
+    initial: cool
+    icon: mdi:thermostat
+  bedroom_ac_fan:
+    name: AC Fan
+    options: [low, med, high, auto]
+    initial: high
+    icon: mdi:fan
+
+input_number:
+  bedroom_ac_temp:
+    name: AC Temperature
+    min: 16
+    max: 30
+    step: 1
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+
+script:
+  bedroom_ac_apply_state:
+    alias: AC — Apply State
+    icon: mdi:air-conditioner
+    variables:
+      # One entry per mode_temp_fan combination, e.g. 2 modes × 15 temps × 4 fans = 120.
+      codes:
+        "cool_22_low": "REPLACE_BASE64_IR_FRAME"
+        "cool_22_med": "REPLACE_BASE64_IR_FRAME"
+        # ...
+      key: "{{ states('input_select.bedroom_ac_mode') }}_{{ states('input_number.bedroom_ac_temp')|int }}_{{ states('input_select.bedroom_ac_fan') }}"
+    sequence:
+      - service: remote.send_command
+        target:
+          entity_id: remote.REPLACE_ir_blaster
+        data:
+          command: "b64:{{ codes[key] }}"
+
+  bedroom_ac_power_toggle:
+    alias: AC — Power Toggle
+    icon: mdi:power
+    sequence:
+      - service: remote.send_command
+        target:
+          entity_id: remote.REPLACE_ir_blaster
+        data:
+          command: "b64:REPLACE_BASE64_POWER_TOGGLE_FRAME"
+      - service: input_boolean.toggle
+        target:
+          entity_id: input_boolean.bedroom_ac_on
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_boolean.bedroom_ac_on
+                state: "on"
+            sequence:
+              - delay: {seconds: 1}
+              - service: script.bedroom_ac_apply_state
+
+automation:
+  - alias: AC — apply on setting change
+    id: bedroom_ac_apply_on_change
+    trigger:
+      - platform: state
+        entity_id:
+          - input_number.bedroom_ac_temp
+          - input_select.bedroom_ac_mode
+          - input_select.bedroom_ac_fan
+    condition:
+      - condition: state
+        entity_id: input_boolean.bedroom_ac_on
+        state: "on"
+    mode: restart
+    action:
+      - service: script.bedroom_ac_apply_state

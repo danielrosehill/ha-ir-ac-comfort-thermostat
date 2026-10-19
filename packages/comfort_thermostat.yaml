@@ -1,0 +1,166 @@
+# Comfort Thermostat — closed-loop control of the
+# IR-only AC around ONE selected room.
+#
+#   Master toggle:  input_boolean.climate_manager      (off = hands-off / vacation)
+#   Target room:    input_select.climate_manager_room  (Bedroom / Living Room / Office)
+#   Comfort temp:   input_number.climate_manager_target_{bedroom,living_room,office}
+#   Auto room:      input_boolean.climate_manager_auto_room — 22:00 → Bedroom,
+#                   09:00 → Living Room. Manual picks hold until the next boundary.
+#
+# Every 10 min (and immediately on toggle/room/target change), while the AC is
+# assumed ON:
+#   * mode is forced to cool (any other mode is switched over)
+#   * fan follows the error e = room − target:  e ≥ 1.5 high · e ≥ 0.5 med · else low
+#   * setpoint steps 1 °C per tick: e > +0.5 → down (floor 17) · e < −0.5 → up (cap 28)
+#     inside ±0.5 °C it holds.
+# Never powers the unit on/off — power is a blind IR toggle and HA's on/off is
+# only assumed (input_boolean.bedroom_ac_on).
+# Each helper write fires bedroom_ac_apply_on_change, which re-sends the full
+# mode+temp+fan frame, so a fan + setpoint change in one tick sends ≤ 2 frames.
+
+input_boolean:
+  climate_manager:
+    name: Comfort Thermostat
+    icon: mdi:thermostat-auto
+  climate_manager_auto_room:
+    name: Comfort Thermostat — auto room (night bedroom / day living room)
+    icon: mdi:calendar-clock
+
+input_select:
+  climate_manager_room:
+    name: Comfort Thermostat Room
+    options: [Bedroom, Living Room, Office]
+    icon: mdi:home-thermometer
+
+input_number:
+  climate_manager_target_bedroom:
+    name: Comfort Target — Bedroom
+    min: 17
+    max: 28
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:bed
+  climate_manager_target_living_room:
+    name: Comfort Target — Living Room
+    min: 17
+    max: 28
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:sofa
+  climate_manager_target_office:
+    name: Comfort Target — Office
+    min: 17
+    max: 28
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:desk
+
+template:
+  - sensor:
+      - name: Comfort Thermostat Room Temperature
+        unique_id: climate_manager_room_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: >-
+          {% set s = {'Bedroom': 'sensor.REPLACE_bedroom_temperature',
+                      'Living Room': 'sensor.REPLACE_living_room_temperature',
+                      'Office': 'sensor.REPLACE_office_temperature'}[states('input_select.climate_manager_room')] | default('') %}
+          {{ states(s) if s else 'unavailable' }}
+        availability: >-
+          {% set s = {'Bedroom': 'sensor.REPLACE_bedroom_temperature',
+                      'Living Room': 'sensor.REPLACE_living_room_temperature',
+                      'Office': 'sensor.REPLACE_office_temperature'}[states('input_select.climate_manager_room')] | default('') %}
+          {{ s != '' and states(s) | is_number }}
+      - name: Comfort Thermostat Target
+        unique_id: climate_manager_target
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: >-
+          {{ states('input_number.climate_manager_target_' ~
+                    states('input_select.climate_manager_room') | lower | replace(' ', '_')) }}
+
+automation:
+  - alias: Comfort Thermostat — tick
+    id: climate_manager_tick
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/10"
+      - platform: state
+        entity_id: input_boolean.climate_manager
+        to: "on"
+      - platform: state
+        entity_id:
+          - input_select.climate_manager_room
+          - input_number.climate_manager_target_bedroom
+          - input_number.climate_manager_target_living_room
+          - input_number.climate_manager_target_office
+    condition:
+      - condition: state
+        entity_id: input_boolean.climate_manager
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.bedroom_ac_on
+        state: "on"
+    action:
+      - variables:
+          room_raw: "{{ states('sensor.comfort_thermostat_room_temperature') }}"
+          target: "{{ states('sensor.comfort_thermostat_target') | float(22) }}"
+          setpoint: "{{ states('input_number.bedroom_ac_temp') | int(24) }}"
+      - condition: template
+        value_template: "{{ room_raw | is_number }}"
+      - variables:
+          err: "{{ room_raw | float - target }}"
+          want_fan: "{{ 'high' if err >= 1.5 else ('med' if err >= 0.5 else 'low') }}"
+          want_setpoint: >-
+            {% if err > 0.5 %}{{ [setpoint - 1, 17] | max }}
+            {% elif err < -0.5 %}{{ [setpoint + 1, 28] | min }}
+            {% else %}{{ setpoint }}{% endif %}
+      - if:
+          - condition: template
+            value_template: "{{ not is_state('input_select.bedroom_ac_mode', 'cool') }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.bedroom_ac_mode
+            data:
+              option: cool
+      - if:
+          - condition: template
+            value_template: "{{ states('input_select.bedroom_ac_fan') != want_fan }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.bedroom_ac_fan
+            data:
+              option: "{{ want_fan }}"
+      - if:
+          - condition: template
+            value_template: "{{ want_setpoint | int != setpoint }}"
+        then:
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.bedroom_ac_temp
+            data:
+              value: "{{ want_setpoint | int }}"
+
+  - alias: Comfort Thermostat — auto room by time of day
+    id: climate_manager_auto_room
+    mode: single
+    trigger:
+      - platform: time
+        at: "22:00:00"
+        id: night
+      - platform: time
+        at: "09:00:00"
+        id: day
+    condition:
+      - condition: state
+        entity_id: input_boolean.climate_manager_auto_room
+        state: "on"
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.climate_manager_room
+        data:
+          option: "{{ 'Bedroom' if trigger.id == 'night' else 'Living Room' }}"
