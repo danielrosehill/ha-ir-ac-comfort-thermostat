@@ -1,22 +1,26 @@
 # Comfort Thermostat — closed-loop control of the
 # IR-only AC around ONE selected room.
+# v2: cool/idle cycling with anticipation (v1 stepped the setpoint 1 °C per
+# tick — see README § "Why v1 was replaced").
 #
 #   Master toggle:  input_boolean.climate_manager      (off = hands-off / vacation)
 #   Target room:    input_select.climate_manager_room  (Bedroom / Living Room / Office)
 #   Comfort temp:   input_number.climate_manager_target_{bedroom,living_room,office}
 #   Auto room:      input_boolean.climate_manager_auto_room — 22:00 → Bedroom,
 #                   09:00 → Living Room. Manual picks hold until the next boundary.
+#   Phase (internal): input_boolean.climate_manager_cooling — on = COOL, off = IDLE
 #
-# Every 10 min (and immediately on toggle/room/target change), while the AC is
-# assumed ON:
-#   * mode is forced to cool (any other mode is switched over)
-#   * fan follows the error e = room − target:  e ≥ 1.5 high · e ≥ 0.5 med · else low
-#   * setpoint steps 1 °C per tick: e > +0.5 → down (floor 17) · e < −0.5 → up (cap 28)
-#     inside ±0.5 °C it holds.
-# Never powers the unit on/off — power is a blind IR toggle and HA's on/off is
-# only assumed (input_boolean.bedroom_ac_on).
+# Every 5 min (and immediately on toggle/room/target change), while the AC is
+# assumed ON, with e = room − target and slope = room trend in °C/min:
+#   IDLE → COOL  when e ≥ +0.5
+#   COOL → IDLE  when e ≤ −0.3, or the 10-min forecast (e + 10·slope) ≤ 0
+#                (anticipation: stop before the target, the duct keeps cooling)
+#   COOL:  setpoint = target − 2 (17 if e ≥ 1.5);  fan high e ≥ 1.5 · med e ≥ 0.5 · else low
+#   IDLE:  setpoint = 28 (compressor stays off in cool mode), fan low
+# Mode is always forced to cool. Never powers the unit on/off — power is a
+# blind IR toggle and HA's on/off is only assumed (input_boolean.bedroom_ac_on).
 # Each helper write fires bedroom_ac_apply_on_change, which re-sends the full
-# mode+temp+fan frame, so a fan + setpoint change in one tick sends ≤ 2 frames.
+# mode+temp+fan frame, so frames go out only on phase/fan changes.
 
 input_boolean:
   climate_manager:
@@ -25,6 +29,9 @@ input_boolean:
   climate_manager_auto_room:
     name: Comfort Thermostat — auto room (night bedroom / day living room)
     icon: mdi:calendar-clock
+  climate_manager_cooling:
+    name: Comfort Thermostat — cooling phase
+    icon: mdi:snowflake
 
 input_select:
   climate_manager_room:
@@ -55,6 +62,12 @@ input_number:
     unit_of_measurement: "°C"
     icon: mdi:desk
 
+# Room trend (°C/min) comes from UI Derivative helpers, one per room sensor
+# (Settings → Helpers → Derivative sensor; source = the room temperature sensor,
+# time window 15 min, time unit minutes, 3 decimals). UI helpers load without a
+# restart; a YAML `platform: derivative` sensor needs a full HA restart.
+# Replace sensor.REPLACE_*_TREND_SENSOR below with their entity ids.
+
 template:
   - sensor:
       - name: Comfort Thermostat Room Temperature
@@ -62,15 +75,23 @@ template:
         unit_of_measurement: "°C"
         device_class: temperature
         state: >-
-          {% set s = {'Bedroom': 'sensor.REPLACE_bedroom_temperature',
-                      'Living Room': 'sensor.REPLACE_living_room_temperature',
-                      'Office': 'sensor.REPLACE_office_temperature'}[states('input_select.climate_manager_room')] | default('') %}
+          {% set s = {'Bedroom': 'sensor.REPLACE_BEDROOM_TEMP_SENSOR',
+                      'Living Room': 'sensor.REPLACE_LIVING_ROOM_TEMP_SENSOR',
+                      'Office': 'sensor.REPLACE_OFFICE_TEMP_SENSOR'}[states('input_select.climate_manager_room')] | default('') %}
           {{ states(s) if s else 'unavailable' }}
         availability: >-
-          {% set s = {'Bedroom': 'sensor.REPLACE_bedroom_temperature',
-                      'Living Room': 'sensor.REPLACE_living_room_temperature',
-                      'Office': 'sensor.REPLACE_office_temperature'}[states('input_select.climate_manager_room')] | default('') %}
+          {% set s = {'Bedroom': 'sensor.REPLACE_BEDROOM_TEMP_SENSOR',
+                      'Living Room': 'sensor.REPLACE_LIVING_ROOM_TEMP_SENSOR',
+                      'Office': 'sensor.REPLACE_OFFICE_TEMP_SENSOR'}[states('input_select.climate_manager_room')] | default('') %}
           {{ s != '' and states(s) | is_number }}
+      - name: Comfort Thermostat Room Trend
+        unique_id: climate_manager_room_trend
+        unit_of_measurement: "°C/min"
+        state: >-
+          {% set s = {'Bedroom': 'sensor.REPLACE_BEDROOM_TREND_SENSOR',
+                      'Living Room': 'sensor.REPLACE_LIVING_ROOM_TREND_SENSOR',
+                      'Office': 'sensor.REPLACE_OFFICE_TREND_SENSOR'}[states('input_select.climate_manager_room')] | default('') %}
+          {{ states(s) | float(0) if s else 0 }}
       - name: Comfort Thermostat Target
         unique_id: climate_manager_target
         unit_of_measurement: "°C"
@@ -85,7 +106,7 @@ automation:
     mode: single
     trigger:
       - platform: time_pattern
-        minutes: "/10"
+        minutes: "/5"
       - platform: state
         entity_id: input_boolean.climate_manager
         to: "on"
@@ -106,16 +127,29 @@ automation:
       - variables:
           room_raw: "{{ states('sensor.comfort_thermostat_room_temperature') }}"
           target: "{{ states('sensor.comfort_thermostat_target') | float(22) }}"
+          slope: "{{ states('sensor.comfort_thermostat_room_trend') | float(0) }}"
           setpoint: "{{ states('input_number.bedroom_ac_temp') | int(24) }}"
+          was_cooling: "{{ is_state('input_boolean.climate_manager_cooling', 'on') }}"
       - condition: template
         value_template: "{{ room_raw | is_number }}"
       - variables:
           err: "{{ room_raw | float - target }}"
-          want_fan: "{{ 'high' if err >= 1.5 else ('med' if err >= 0.5 else 'low') }}"
+          cooling: >-
+            {{ (was_cooling and not (err <= -0.3 or err + 10 * slope <= 0))
+               or (not was_cooling and err >= 0.5) }}
+          want_fan: >-
+            {{ 'low' if not cooling else
+               ('high' if err >= 1.5 else ('med' if err >= 0.5 else 'low')) }}
           want_setpoint: >-
-            {% if err > 0.5 %}{{ [setpoint - 1, 17] | max }}
-            {% elif err < -0.5 %}{{ [setpoint + 1, 28] | min }}
-            {% else %}{{ setpoint }}{% endif %}
+            {{ 28 if not cooling else
+               (17 if err >= 1.5 else [[(target - 2) | round(0, 'floor') | int, 17] | max, 28] | min) }}
+      - if:
+          - condition: template
+            value_template: "{{ cooling != was_cooling }}"
+        then:
+          - service: "input_boolean.turn_{{ 'on' if cooling else 'off' }}"
+            target:
+              entity_id: input_boolean.climate_manager_cooling
       - if:
           - condition: template
             value_template: "{{ not is_state('input_select.bedroom_ac_mode', 'cool') }}"
