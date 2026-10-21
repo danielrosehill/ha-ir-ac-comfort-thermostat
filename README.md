@@ -20,9 +20,11 @@ It suits a central or ducted AC with one shared setpoint feeding several rooms. 
 - `e = room − target`, `slope` = room trend in °C/min (from a Derivative helper, see Setup).
 - The loop cycles between two phases, stored in `input_boolean.climate_manager_cooling`:
   - **IDLE → COOL** when `e ≥ +0.5`
-  - **COOL → IDLE** when `e ≤ −0.3`, or the 10-minute forecast `e + 10·slope ≤ 0`. This is
+  - **COOL → IDLE** when `e ≤ 0`, or the 10-minute forecast `e + 10·slope ≤ +0.2`. This is
     anticipation: a ducted unit keeps cooling after it stops, so it has to quit before the target.
-- **COOL:** setpoint = target − 2 (17 if `e ≥ 1.5`). Fan: `e ≥ 1.5` → high, `e ≥ 0.5` → med, otherwise low.
+- **COOL:** setpoint = target − 1 (target − 2 if `e ≥ 1.5`). Fan: `e ≥ 2` → high, `e ≥ 1` → med, otherwise low.
+  These are the gentler values from 2026-10-21; the first version (target − 2, fan med from `e ≥ 0.5`,
+  stop at `e ≤ −0.3` / forecast ≤ 0) dropped the room 0.6–0.9 °C per burst and undershot by ~0.3 °C.
 - **IDLE:** setpoint 28, which keeps the compressor off in cool mode. Fan low.
 - IR frames only go out when the phase or fan changes.
 - Optional auto-room: 22:00 → Bedroom, 09:00 → Living Room. A manual pick holds until the next boundary.

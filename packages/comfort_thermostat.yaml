@@ -13,9 +13,9 @@
 # Every 5 min (and immediately on toggle/room/target change), while the AC is
 # assumed ON, with e = room − target and slope = room trend in °C/min:
 #   IDLE → COOL  when e ≥ +0.5
-#   COOL → IDLE  when e ≤ −0.3, or the 10-min forecast (e + 10·slope) ≤ 0
+#   COOL → IDLE  when e ≤ 0, or the 10-min forecast (e + 10·slope) ≤ +0.2
 #                (anticipation: stop before the target, the duct keeps cooling)
-#   COOL:  setpoint = target − 2 (17 if e ≥ 1.5);  fan high e ≥ 1.5 · med e ≥ 0.5 · else low
+#   COOL:  setpoint = target − 1 (target − 2 if e ≥ 1.5);  fan high e ≥ 2 · med e ≥ 1 · else low
 #   IDLE:  setpoint = 28 (compressor stays off in cool mode), fan low
 # Mode is always forced to cool. Never powers the unit on/off — power is a
 # blind IR toggle and HA's on/off is only assumed (input_boolean.bedroom_ac_on).
@@ -135,14 +135,14 @@ automation:
       - variables:
           err: "{{ room_raw | float - target }}"
           cooling: >-
-            {{ (was_cooling and not (err <= -0.3 or err + 10 * slope <= 0))
+            {{ (was_cooling and not (err <= 0 or err + 10 * slope <= 0.2))
                or (not was_cooling and err >= 0.5) }}
           want_fan: >-
             {{ 'low' if not cooling else
-               ('high' if err >= 1.5 else ('med' if err >= 0.5 else 'low')) }}
+               ('high' if err >= 2 else ('med' if err >= 1 else 'low')) }}
           want_setpoint: >-
             {{ 28 if not cooling else
-               (17 if err >= 1.5 else [[(target - 2) | round(0, 'floor') | int, 17] | max, 28] | min) }}
+               [[(target - (2 if err >= 1.5 else 1)) | round(0, 'floor') | int, 17] | max, 28] | min }}
       - if:
           - condition: template
             value_template: "{{ cooling != was_cooling }}"
