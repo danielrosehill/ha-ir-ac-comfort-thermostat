@@ -1,7 +1,8 @@
 # Comfort Thermostat — closed-loop control of the
 # IR-only AC around ONE selected room.
 # v2: cool/idle cycling with anticipation (v1 stepped the setpoint 1 °C per
-# tick — see README § "Why v1 was replaced").
+# tick — see README § "Why v1 was replaced"). v2.1: gentler bursts.
+# v2.2: thresholds as helpers. v2.3 (this file): auto-off.
 #
 #   Master toggle:  input_boolean.climate_manager      (off = hands-off / vacation)
 #   Target room:    input_select.climate_manager_room  (Bedroom / Living Room / Office)
@@ -17,8 +18,16 @@
 #                (anticipation: stop before the target, the duct keeps cooling)
 #   COOL:  setpoint = target − 1 (target − 2 if e ≥ 1.5);  fan high e ≥ 2 · med e ≥ 1 · else low
 #   IDLE:  setpoint = 28 (compressor stays off in cool mode), fan low
-# Mode is always forced to cool. Never powers the unit on/off — power is a
-# blind IR toggle and HA's on/off is only assumed (input_boolean.bedroom_ac_on).
+# Mode is always forced to cool. Power is a blind IR toggle and HA's on/off is
+# only assumed (input_boolean.bedroom_ac_on).
+#
+# Auto-off (v2.3; switch input_boolean.climate_manager_auto_off):
+#   PARK    when IDLE for ≥ park_minutes (30) and e ≤ park_error (−0.5): the room
+#           is below target on its own, so power the unit off (toggle) and set
+#           input_boolean.climate_manager_parked.
+#   RESUME  while parked, when e ≥ start: power on (toggle), clear parked, COOL.
+#   Only a park the thermostat made is resumed. If the AC is turned off by
+#   hand it stays off; turned on by hand while parked clears the park.
 # Each helper write fires bedroom_ac_apply_on_change, which re-sends the full
 # mode+temp+fan frame, so frames go out only on phase/fan changes.
 
@@ -32,6 +41,12 @@ input_boolean:
   climate_manager_cooling:
     name: Comfort Thermostat — cooling phase
     icon: mdi:snowflake
+  climate_manager_auto_off:
+    name: Comfort Thermostat — auto-off when the room is cool on its own
+    icon: mdi:power-sleep
+  climate_manager_parked:
+    name: Comfort Thermostat — AC parked (turned off by the thermostat)
+    icon: mdi:sleep
 
 input_select:
   climate_manager_room:
@@ -135,6 +150,24 @@ input_number:
     mode: box
     unit_of_measurement: "°C"
     icon: mdi:tune-variant
+  # Auto-off (v2.3). Kept apart from the tune_* control-law thresholds.
+  # No initial: — set them once after the first reload (−0.5 and 30).
+  climate_manager_park_error:
+    name: Comfort Thermostat — auto-off at error ≤
+    min: -3
+    max: 0
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:power-sleep
+  climate_manager_park_minutes:
+    name: Comfort Thermostat — auto-off after idle for
+    min: 10
+    max: 180
+    step: 5
+    mode: box
+    unit_of_measurement: "min"
+    icon: mdi:power-sleep
 
 # Room trend (°C/min) comes from UI Derivative helpers, one per room sensor
 # (Settings → Helpers → Derivative sensor; source = the room temperature sensor,
@@ -194,9 +227,14 @@ automation:
       - condition: state
         entity_id: input_boolean.climate_manager
         state: "on"
-      - condition: state
-        entity_id: input_boolean.bedroom_ac_on
-        state: "on"
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_boolean.bedroom_ac_on
+            state: "on"
+          - condition: state
+            entity_id: input_boolean.climate_manager_parked
+            state: "on"
     action:
       - variables:
           room_raw: "{{ states('sensor.comfort_thermostat_room_temperature') }}"
@@ -226,6 +264,30 @@ automation:
           want_setpoint: >-
             {{ 28 if not cooling else
                [[(target - (t_boost_offset if err >= t_boost_error else t_cool_offset)) | round(0, 'floor') | int, 17] | max, 28] | min }}
+      # Parked: the AC was powered off by auto-off below.
+      - if:
+          - condition: state
+            entity_id: input_boolean.climate_manager_parked
+            state: "on"
+        then:
+          - if:
+              - condition: state
+                entity_id: input_boolean.bedroom_ac_on
+                state: "off"
+            then:
+              - condition: template
+                value_template: "{{ err >= t_start }}"
+              - service: logbook.log
+                data:
+                  name: Comfort Thermostat
+                  message: >-
+                    resumed: {{ states('input_select.climate_manager_room') }}
+                    {{ room_raw }} °C, target {{ target }} (e {{ err | round(2) }})
+                  entity_id: input_boolean.climate_manager_parked
+              - service: script.bedroom_ac_power_toggle
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.climate_manager_parked
       - if:
           - condition: template
             value_template: "{{ cooling != was_cooling }}"
@@ -260,6 +322,28 @@ automation:
               entity_id: input_number.bedroom_ac_temp
             data:
               value: "{{ want_setpoint | int }}"
+      # Auto-off: idle long enough and still below target means the house is
+      # cool on its own; the idle fan would only make it colder.
+      - if:
+          - condition: template
+            value_template: >-
+              {{ is_state('input_boolean.climate_manager_auto_off', 'on')
+                 and not cooling and not was_cooling
+                 and err <= states('input_number.climate_manager_park_error') | float(-0.5)
+                 and (now() - states.input_boolean.climate_manager_cooling.last_changed).total_seconds()
+                     >= 60 * states('input_number.climate_manager_park_minutes') | float(30) }}
+        then:
+          - service: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.climate_manager_parked
+          - service: logbook.log
+            data:
+              name: Comfort Thermostat
+              message: >-
+                parked (AC off): {{ states('input_select.climate_manager_room') }}
+                {{ room_raw }} °C, target {{ target }} (e {{ err | round(2) }})
+              entity_id: input_boolean.climate_manager_parked
+          - service: script.bedroom_ac_power_toggle
 
   - alias: Comfort Thermostat — auto room by time of day
     id: climate_manager_auto_room
