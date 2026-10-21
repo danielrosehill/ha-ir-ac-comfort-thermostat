@@ -68,6 +68,10 @@ setpoints 18, 19 and 20). The setpoint behaves like an on/off lever for the comp
 - The real fix for drift is an IR **receiver** next to the AC that decodes the handheld remote, such as
   an ESPHome board with TX and RX. That's a hardware upgrade; the YAML pattern stays the same.
 
+## Report
+
+[`docs/comfort-thermostat-thermal-report-2026-10-21.pdf`](docs/comfort-thermostat-thermal-report-2026-10-21.pdf) is a plain-language write-up of the deployment this pattern came from: how it controls the AC, the v1 → v2.2 history, and ten days of indoor/outdoor temperature data (11–21 Oct 2026).
+
 ## Related
 
 - Decoded IR protocol for an Electra central (ducted) AC, used to generate all 120 state frames:
