@@ -27,6 +27,9 @@ It suits a central or ducted AC with one shared setpoint feeding several rooms. 
   stop at `e ≤ −0.3` / forecast ≤ 0) dropped the room 0.6–0.9 °C per burst and undershot by ~0.3 °C.
 - **IDLE:** setpoint 28, which keeps the compressor off in cool mode. Fan low.
 - IR frames only go out when the phase or fan changes.
+- Every threshold above is an `input_number.climate_manager_tune_*` helper (`start`, `stop`, `forecast_stop`,
+  `horizon`, `cool_offset`, `boost_error`, `boost_offset`, `fan_med`, `fan_high`). That way you can retune without editing YAML.
+  The helpers have no `initial:`, so **set them once after the first reload**: a new `input_number` starts at its `min`.
 - Optional auto-room: 22:00 → Bedroom, 09:00 → Living Room. A manual pick holds until the next boundary.
 
 Three template sensors (`sensor.comfort_thermostat_room_temperature`,

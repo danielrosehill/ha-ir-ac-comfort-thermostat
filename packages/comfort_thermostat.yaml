@@ -61,6 +61,80 @@ input_number:
     step: 0.5
     unit_of_measurement: "°C"
     icon: mdi:desk
+  # Tuning knobs (v2.2, 2026-10-21). Read by the tick; changed by the
+  # thermostat-tune skill. No `initial:` so tuned values survive restarts.
+  climate_manager_tune_start:
+    name: Comfort Thermostat tune — start cooling at error ≥
+    min: 0.2
+    max: 2
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_stop:
+    name: Comfort Thermostat tune — stop cooling at error ≤
+    min: -1
+    max: 0.5
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_forecast_stop:
+    name: Comfort Thermostat tune — stop when forecast error ≤
+    min: -0.5
+    max: 1
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_horizon:
+    name: Comfort Thermostat tune — forecast horizon
+    min: 0
+    max: 30
+    step: 1
+    mode: box
+    unit_of_measurement: "min"
+    icon: mdi:tune-variant
+  climate_manager_tune_cool_offset:
+    name: Comfort Thermostat tune — setpoint below target while cooling
+    min: 0
+    max: 4
+    step: 1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_boost_error:
+    name: Comfort Thermostat tune — boost (bigger offset) at error ≥
+    min: 0.5
+    max: 4
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_boost_offset:
+    name: Comfort Thermostat tune — boost setpoint below target
+    min: 1
+    max: 6
+    step: 1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_fan_med:
+    name: Comfort Thermostat tune — fan med at error ≥
+    min: 0
+    max: 4
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
+  climate_manager_tune_fan_high:
+    name: Comfort Thermostat tune — fan high at error ≥
+    min: 0
+    max: 5
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°C"
+    icon: mdi:tune-variant
 
 # Room trend (°C/min) comes from UI Derivative helpers, one per room sensor
 # (Settings → Helpers → Derivative sensor; source = the room temperature sensor,
@@ -130,19 +204,28 @@ automation:
           slope: "{{ states('sensor.comfort_thermostat_room_trend') | float(0) }}"
           setpoint: "{{ states('input_number.bedroom_ac_temp') | int(24) }}"
           was_cooling: "{{ is_state('input_boolean.climate_manager_cooling', 'on') }}"
+          t_start: "{{ states('input_number.climate_manager_tune_start') | float(0.5) }}"
+          t_stop: "{{ states('input_number.climate_manager_tune_stop') | float(0) }}"
+          t_forecast_stop: "{{ states('input_number.climate_manager_tune_forecast_stop') | float(0.2) }}"
+          t_horizon: "{{ states('input_number.climate_manager_tune_horizon') | float(10) }}"
+          t_cool_offset: "{{ states('input_number.climate_manager_tune_cool_offset') | float(1) }}"
+          t_boost_error: "{{ states('input_number.climate_manager_tune_boost_error') | float(1.5) }}"
+          t_boost_offset: "{{ states('input_number.climate_manager_tune_boost_offset') | float(2) }}"
+          t_fan_med: "{{ states('input_number.climate_manager_tune_fan_med') | float(1) }}"
+          t_fan_high: "{{ states('input_number.climate_manager_tune_fan_high') | float(2) }}"
       - condition: template
         value_template: "{{ room_raw | is_number }}"
       - variables:
           err: "{{ room_raw | float - target }}"
           cooling: >-
-            {{ (was_cooling and not (err <= 0 or err + 10 * slope <= 0.2))
-               or (not was_cooling and err >= 0.5) }}
+            {{ (was_cooling and not (err <= t_stop or err + t_horizon * slope <= t_forecast_stop))
+               or (not was_cooling and err >= t_start) }}
           want_fan: >-
             {{ 'low' if not cooling else
-               ('high' if err >= 2 else ('med' if err >= 1 else 'low')) }}
+               ('high' if err >= t_fan_high else ('med' if err >= t_fan_med else 'low')) }}
           want_setpoint: >-
             {{ 28 if not cooling else
-               [[(target - (2 if err >= 1.5 else 1)) | round(0, 'floor') | int, 17] | max, 28] | min }}
+               [[(target - (t_boost_offset if err >= t_boost_error else t_cool_offset)) | round(0, 'floor') | int, 17] | max, 28] | min }}
       - if:
           - condition: template
             value_template: "{{ cooling != was_cooling }}"
